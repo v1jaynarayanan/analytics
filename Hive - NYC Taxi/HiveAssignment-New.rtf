@@ -1,0 +1,574 @@
+{\rtf1\ansi\ansicpg1252\cocoartf1348\cocoasubrtf170
+{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww10800\viewh8400\viewkind0
+\pard\tx566\tx1133\tx1700\tx2267\tx2834\tx3401\tx3968\tx4535\tx5102\tx5669\tx6236\tx6803\pardirnatural
+
+\f0\fs24 \cf0 -- Data Ingestion and Processing Assignment\
+-- Author : Vijay Narayanan\
+-- UpGrad Id : DDA1740036\
+\
+-- New York City Taxi & Limousine Commission (TLC) Dataset loaded from\
+-- directory /common_folder/nyc_taxi_data/\
+\
+-- Set following on Hive to load input files from multiple subdirectories\
+set hive.input.dir.recursive=TRUE;\
+set hive.mapred.supports.subdirectories=TRUE;\
+set hive.supports.subdirectories=TRUE;\
+set mapreduce.input.fileinputformat.input.dir.recursive=TRUE;\
+set mapred.input.dir.recursive=TRUE;\
+\
+-- Add cloudera jar\
+ADD JAR /opt/cloudera/parcels/CDH/lib/hive/lib/hive-hcatalog-core-1.1.0-cdh5.11.2.jar;\
+\
+-- Drop table \
+drop table nyc_yellow_taxi;\
+\
+-- Create external table\
+-- skip header row and a blank row after the header row i.e line count 2\
+create external table if not exists nyc_yellow_taxi (\
+VendorID int,\
+tpep_pickup_datetime timestamp,\
+tpep_dropoff_datetime timestamp,\
+passenger_count int,\
+trip_distance double,\
+RatecodeID double,\
+store_and_fwd_flag char(1),\
+PULocationID int,\
+DOLocationID int,\
+payment_type int,\
+fare_amount double,\
+extra double,\
+mta_tax double,\
+tip_amount double,\
+tolls_amount double,\
+improvement_surcharge double,\
+total_amount double\
+)\
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ','\
+location '/common_folder/nyc_taxi_data/'\
+TBLPROPERTIES ("skip.header.line.count"="2");\
+\
+-- Check count of records loaded into external table \
+select count(*) as count from nyc_yellow_taxi;\
+\
+-- Print top 5 rows from table\
+select * from nyc_yellow_taxi limit 5;\
+\
+-- Partition the data on Year and Month for better performance\
+\
+SET hive.exec.max.dynamic.partitions=1000;\
+SET hive.exec.max.dynamic.partitions.pernode=1000;\
+SET hive.exec.dynamic.partition = true;\
+SET hive.exec.dynamic.partition.mode = nonstrict;\
+\
+-- Drop existing table\
+drop table nyc_yellow_taxi_partitioned_orc;\
+\
+/* Create external partitioned table */\
+create external table if not exists nyc_yellow_taxi_partitioned_orc\
+(VendorID int,\
+tpep_pickup_datetime timestamp,\
+tpep_dropoff_datetime timestamp,\
+passenger_count int,\
+trip_distance double,\
+RatecodeID double,\
+store_and_fwd_flag char(1),\
+PULocationID int,\
+DOLocationID int,\
+payment_type int,\
+fare_amount double,\
+extra double,\
+mta_tax double,\
+tip_amount double,\
+tolls_amount double,\
+improvement_surcharge double,\
+total_amount double) partitioned by (yr int, mnth int)\
+stored as orc location '/user/vijayanand25_hotmail/nyc_taxi' \
+tblproperties ("orc.compress"="SNAPPY");\
+\
+\
+/* Then insert the data in the table */\
+insert overwrite table nyc_yellow_taxi_partitioned_orc partition(yr, mnth)\
+select VendorID,\
+tpep_pickup_datetime,\
+tpep_dropoff_datetime,\
+passenger_count,\
+trip_distance,\
+RatecodeID,\
+store_and_fwd_flag,\
+PULocationID,\
+DOLocationID,\
+payment_type,\
+fare_amount,\
+extra,\
+mta_tax,\
+tip_amount,\
+tolls_amount,\
+improvement_surcharge,\
+total_amount,\
+year(tpep_pickup_datetime) as yr,\
+month(tpep_pickup_datetime) as mnth\
+from nyc_yellow_taxi;\
+\
+--------------------------------\
+-- Basic Data Quality Checks  --\
+--------------------------------\
+\
+-- 1. How many records has each TPEP provider provided? \
+select nyc.vendorid as vendor_id, count(*) as count from nyc_yellow_taxi_partitioned_orc nyc\
+group by nyc.vendorid\
+order by nyc.vendorid;\
+-- vendor 1 : 8447149\
+-- vendor 2 : 10345930\
+\
+-- 2. The data provided is for months November and December only. \
+--    Check whether the data is consistent, and if not, identify the data quality issues.\
+\
+-- Describe table\
+deescribe nyc_yellow_taxi_partitioned_orc;\
+\
+-- Check tpep_pickup_datetime and tpep_dropoff_datetime columns to see if data is only for Nov and Dec\
+select distinct nyc.tpep_pickup_datetime as pickup_datetime from nyc_yellow_taxi_partitioned_orc nyc limit 10;\
+-- There are records for Jan\
+select distinct nyc.tpep_dropoff_datetime as dropoff_datetime from nyc_yellow_taxi_partitioned_orc nyc limit 10;\
+-- Similarly, there are records for Jan\
+-- So, we can conclude that data exists for months other than Nov and Dec\
+\
+-- Check all columns for consistency of data by referring to provided data dictoonary\
+-- https://cdn.upgrad.com/UpGrad/temp/be1ac6e9-d492-4cba-b5a5-8fe1b8bc872b/data_dictionary_trip_records_yellow_taxi.pdf\
+\
+-- Validate Vendor Id\
+-- 1 = Creative Mobile Technologies, LLC; 2 = VeriFone Inc\
+select * from nyc_yellow_taxi_partitioned_orc nyc where nyc.vendorid not in (1,2);\
+-- No issues found with vendor id\
+\
+-- Validate tpep_pickup_datetime\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where yr = 2017 and mnth not in (11, 12) \
+-- There are 208 trip records that have pickup month that are neither Nov nor Dec for the year 2017\
+\
+--select count(*) from nyc_yellow_taxi_partitioned_orc nyc where CONCAT(MONTH(nyc.tpep_pickup_datetime),"-",YEAR(nyc.tpep_pickup_datetime)) \
+--NOT IN ('11-2017','12-2017');\
+-- There are 315 trip records that have pickup times that are neither in Nov 2017 nor Dec 2017\
+\
+-- Validate tpep_dropoff_datetime\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where CONCAT(MONTH(nyc.tpep_dropoff_datetime),"-",YEAR(nyc.tpep_dropoff_datetime)) \
+NOT IN ('11-2017','12-2017');\
+-- There are 1907 trip records that have dropoff times that are neither in Nov 2017 nor Dec 2017\
+\
+-- Validate passenger_count\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.passenger_count is NULL;\
+-- no records without any values for passenger count\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.passenger_count = 0;\
+-- 108970 records have 0 value for passenger count i.e no passengers\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.passenger_count < 0;\
+-- no records with negative values for passenger count\
+\
+-- Validate trip_distance\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.trip_distance is NULL;\
+-- no records without any values for trip distance\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.trip_distance = 0;\
+-- 120017 records have 0 value for trip distance i.e trip distance is zero\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.trip_distance < 0;\
+-- no records with negative values for trip distance\
+\
+-- Validate ratecodeid\
+-- 1= Standard rate, 2=JFK, 3=Newark, 4=Nassau or Westchester, 5=Negotiated fare, 6=Group ride\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.ratecodeid not in (1,2,3,4,5,6); \
+-- There are 178 records with incorrect ratecodeid\
+\
+-- Validate store_and_fwd_flag\
+-- Y= store and forward trip, N= not a store and forward trip\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.store_and_fwd_flag not in ('N','Y'); \
+-- There are no issues\
+\
+-- Validate pulocationid\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.pulocationid is NULL; \
+-- There are no issues\
+\
+-- Validate dolocationid\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.dolocationid is NULL; \
+-- There are no issues\
+\
+-- Validate payment_type\
+-- 1= Credit card, 2= Cash, 3= No charge, 4= Dispute, 5= Unknown, 6= Voided trip\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.payment_type not in (1,2,3,4,5,6); \
+-- There are no issues with payment_type\
+\
+-- Validate fare_amount\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.fare_amount is NULL;\
+-- There are no trip records that have empty fare amount\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.fare_amount = 0; \
+-- There are 5180 trip records that have fare amount of 0\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.fare_amount < 0; \
+-- There are 9372 trip records that negative fare amounts\
+\
+-- Validate extra\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.extra is NULL;\
+-- There are no trip records that have empty extra\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.extra < 0; \
+-- There are 4835 trip records that have negative values for extra\
+\
+-- Validate mta_tax\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.mta_tax is NULL; \
+-- There are 0 trip records that have empty value for mta tax \
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.mta_tax < 0; \
+-- There are 9092 trip records that have negative values for mta tax \
+\
+-- Validate tip_amount\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.tip_amount is NULL; \
+-- There are 0 trip records that have empty value for tip amount\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.tip_amount < 0; \
+-- There are 97 trip records that have negative values for tip amount\
+\
+-- Validate tolls_amount\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.tolls_amount is NULL; \
+-- There are 0 trip records that have empty value for tolls amount\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.tolls_amount < 0; \
+-- There are 41 trip records that have negative values for tolls amount\
+\
+-- Validate improvement_surcharge\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.improvement_surcharge is NULL; \
+-- There are 0 trip records that have empty value for improvement surcharge\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.improvement_surcharge < 0; \
+-- There are 9367 trip records that have negative values for improvement surcharge\
+\
+-- Validate total_amount\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.total_amount is NULL; \
+-- There are 0 trip records that have empty value for total amount\
+select count(*) from nyc_yellow_taxi_partitioned_orc nyc where nyc.total_amount < 0; \
+-- There are 9372 trip records that have negative values for total amount\
+\
+-- 3. You might have encountered unusual or erroneous rows in the dataset. \
+--    Can you conclude which vendor is doing a bad job in providing the records?\
+\
+--SELECT  nyc.vendorid as vendor, count(*) as count from nyc_yellow_taxi_partitioned_orc nyc\
+--where CONCAT(MONTH(nyc.tpep_pickup_datetime),"-",YEAR(nyc.tpep_pickup_datetime)) \
+--NOT IN ('11-2017','12-2017') OR nyc.passenger_count <= 0 \
+--OR nyc.trip_distance <= 0 OR nyc.ratecodeid not in (1,2,3,4,5,6)\
+--OR  nyc.fare_amount <= 0 OR nyc.extra < 0 OR nyc.mta_tax < 0 OR nyc.tip_amount < 0 \
+--OR nyc.tolls_amount < 0 OR nyc.improvement_surcharge < 0 OR nyc.total_amount < 0\
+--GROUP BY nyc.vendorid;\
+\
+SELECT  nyc.vendorid as vendor, count(*) as count from nyc_yellow_taxi_partitioned_orc nyc\
+where nyc.yr = 2017 and nyc.mnth not in (11, 12) OR nyc.passenger_count <= 0 \
+OR nyc.trip_distance <= 0 OR nyc.ratecodeid not in (1,2,3,4,5,6)\
+OR  nyc.fare_amount <= 0 OR nyc.extra < 0 OR nyc.mta_tax < 0 OR nyc.tip_amount < 0 \
+OR nyc.tolls_amount < 0 OR nyc.improvement_surcharge < 0 OR nyc.total_amount < 0\
+GROUP BY nyc.vendorid;\
+-- Vendor 1 had 178489 erroneous rows in the dataset\
+-- Vendor 2 had 59316 erroneous rows in the dataset\
+-- Vendor 1 is doing a bad job when compared to Vendor 2 in providing the records\
+\
+--select * from nyc_yellow_taxi_partitioned_orc nyc where year(nyc.tpep_pickup_datetime) != year(nyc.tpep_dropoff_datetime) and \
+--year(nyc.tpep_pickup_datetime) = '2017'\
+\
+------------------------------\
+--      Analysis-I          --\
+------------------------------\
+-- Trip records considered for analysis are from months November and December only\
+\
+-- 1. Compare the overall average fare for November and December.\
+--select MONTH(nyc.tpep_pickup_datetime) as month, avg(nyc.fare_amount) as avg_fare\
+--from nyc_yellow_taxi_partitioned_orc nyc\
+--where CONCAT(MONTH(nyc.tpep_pickup_datetime),"-",YEAR(nyc.tpep_pickup_datetime)) \
+--IN ('11-2017','12-2017') AND nyc.fare_amount > 0\
+--GROUP BY MONTH(nyc.tpep_pickup_datetime);\
+\
+select MONTH(nyc.tpep_pickup_datetime) as month, avg(nyc.fare_amount) as avg_fare\
+from nyc_yellow_taxi_partitioned_orc nyc\
+where nyc.yr = 2017 and nyc.mnth in (11, 12) AND nyc.fare_amount > 0\
+GROUP BY MONTH(nyc.tpep_pickup_datetime);\
+-- In November the overall average fare was 13.155032472319585\
+-- In December the overall average fare was 12.950125139150966\
+-- Overall average fare in December was lower than in November\
+\
+-- 2. Explore the \'91number of passengers per trip\'92 - how many trips are made by each level of \'91Passenger_count\'92? \
+--    Do most people travel solo or with other people?\
+--select nyc.passenger_count as no_of_passengers, count(*) as total from nyc_yellow_taxi_partitioned_orc nyc \
+--where CONCAT(MONTH(nyc.tpep_pickup_datetime),"-",YEAR(nyc.tpep_pickup_datetime)) \
+--IN ('11-2017','12-2017') AND nyc.passenger_count > 0\
+--GROUP BY nyc.passenger_count\
+--ORDER BY nyc.passenger_count;\
+\
+select nyc.passenger_count as no_of_passengers, count(*) as total from nyc_yellow_taxi_partitioned_orc nyc \
+where nyc.yr = 2017 and nyc.mnth in (11, 12) AND nyc.passenger_count > 0\
+GROUP BY nyc.passenger_count\
+ORDER BY nyc.passenger_count;\
+--  no_of_passengers    total\
+--  1                   13251047\
+--  2                   2816117\
+--  3                   810767\
+--  4                   398846\
+--  5                   875823\
+--  6                   531002\
+--  7                   75\
+--  8                   60\
+--  9                   56\
+--  192                 1\
+-- It can be concluded that most people travel solo in the taxi\
+\
+-- 3. Which is the most preferred mode of payment?\
+--select nyc.payment_type as payment_type, count(*) as count\
+--from nyc_yellow_taxi_partitioned_orc nyc\
+--where CONCAT(MONTH(nyc.tpep_pickup_datetime),"-",YEAR(nyc.tpep_pickup_datetime)) \
+--IN ('11-2017','12-2017') \
+--GROUP BY nyc.payment_type;\
+\
+select nyc.payment_type as payment_type, count(*) as count\
+from nyc_yellow_taxi_partitioned_orc nyc\
+where nyc.yr = 2017 and nyc.mnth in (11, 12)\
+GROUP BY nyc.payment_type;\
+-- payment_type     count\
+--      1           12638517\
+--      2           6026188\
+--      3           100530\
+--      4           27529\
+-- Most popular and preferred mode of payment is 1 i.e Credit Card\
+\
+-- 4. What is the average tip paid? Compare the average tip with the 25th, 50th and 75th percentiles and \
+--    comment whether the \'91average tip\'92 is a representative statistic (of the central tendency) of \'91tip amount paid\'92.\
+--select avg(nyc.tip_amount) as average_tip_paid, \
+--percentile_approx(nyc.tip_amount,0.25) as 25th_percentile, \
+--percentile_approx(nyc.tip_amount,0.50) as 50th_Percentile, \
+--percentile_approx(nyc.tip_amount,0.75) as 75th_Percentile \
+--from nyc_yellow_taxi nyc\
+--where CONCAT(MONTH(nyc.tpep_pickup_datetime),"-",YEAR(nyc.tpep_pickup_datetime)) \
+--IN ('11-2017','12-2017') AND nyc.tip_amount > 0;\
+\
+select avg(nyc.tip_amount) as average_tip_paid, \
+percentile_approx(nyc.tip_amount,0.25) as 25th_percentile, \
+percentile_approx(nyc.tip_amount,0.50) as 50th_Percentile, \
+percentile_approx(nyc.tip_amount,0.75) as 75th_Percentile \
+from nyc_yellow_taxi_partitioned_orc nyc\
+where nyc.yr = 2017 and nyc.mnth in (11, 12) AND nyc.tip_amount > 0;\
+-- The Average Tip Paid was 2.873855884872281\
+-- The 25th Percentile was 1.45\
+-- The 50th Percentile was 2.05 and\
+-- The 75th Percentile was 3.16\
+-- Average tip is a representative statistic (of the central tendency) of \'91tip amount paid\'92.\
+\
+-- 5. Explore the \'91Extra\'92 (charge) variable - what fraction of total trips have an extra charge is levied?\
+\
+-- Total number of trips\
+--select COUNT(*) as total_trips\
+--from nyc_yellow_taxi as nyc\
+--where CONCAT(MONTH(nyc.tpep_pickup_datetime),"-",YEAR(nyc.tpep_pickup_datetime)) \
+--IN ('11-2017','12-2017');\
+select COUNT(*) as total_trips\
+from nyc_yellow_taxi_partitioned_orc as nyc\
+where nyc.yr = 2017 and nyc.mnth in (11, 12);\
+-- Total trips in November and December for year 2017 were 18792764\
+\
+-- Trips for which extra charge was levied \
+--select COUNT(*) as total_trips\
+--from nyc_yellow_taxi as nyc\
+--where CONCAT(MONTH(nyc.tpep_pickup_datetime),"-",YEAR(nyc.tpep_pickup_datetime)) \
+--IN ('11-2017','12-2017') and extra > 0;\
+select COUNT(*) as total_trips\
+from nyc_yellow_taxi_partitioned_orc as nyc\
+where nyc.yr = 2017 and nyc.mnth in (11, 12) and extra > 0;\
+-- Extra charge was levied for 8678323 trips \
+-- 46.17% (i.e 8678323/18792764) of the total trips levied extra charge\
+\
+------------------------------\
+--      Analysis-II         --\
+------------------------------\
+-- 1. What is the correlation between the number of passengers and tip paid? \
+--    Do multiple travellers pay more compared to solo travellers?\
+--select corr(nyc.passenger_count, nyc.tip_amount) as correlation\
+--from nyc_yellow_taxi nyc\
+--where CONCAT(MONTH(nyc.tpep_pickup_datetime),"-",YEAR(nyc.tpep_pickup_datetime)) \
+--IN ('11-2017','12-2017') and nyc.passenger_count > 0 and nyc.tip_amount >= 0 ;\
+select corr(nyc.passenger_count, nyc.tip_amount) as correlation\
+from nyc_yellow_taxi_partitioned_orc nyc\
+where nyc.yr = 2017 and nyc.mnth in (11, 12) and nyc.passenger_count > 0 and nyc.tip_amount >= 0 ;\
+-- There is a very slight negative correlation (-0.004079560302191564) between number of passengers and tip paid, which \
+-- means that multiple passengers do not pay more when compared to solo travellers\
+\
+-- 2. Create five buckets of \'91tip paid\'92: [0-5, 5-10, 10-15, 15-20 and >=20]. \
+--    Calculate the percentage share of each bucket (i.e. the fraction of trips falling in each bucket).\
+\
+-- Total trips in November and December for year 2017 were 18792764, a value obtained from Analysis I, question 5.\
+-- This value will be used in this query to find out the percentage share\
+select CASE \
+		WHEN nyc.tip_amount >= 0 and nyc.tip_amount < 5\
+			THEN 'tip_paid_0_5_bucket'\
+		WHEN nyc.tip_amount >= 5 and nyc.tip_amount < 10\
+			THEN 'tip_paid_5_10_bucket'\
+		WHEN nyc.tip_amount >= 10 and nyc.tip_amount < 15\
+			THEN 'tip_paid_10_15_bucket'\
+		WHEN nyc.tip_amount >= 15 and nyc.tip_amount < 20\
+			THEN 'tip_paid_15_20_bucket'\
+		WHEN nyc.tip_amount >= 20\
+			THEN 'tip_paid_20_and_above'\
+		ELSE 'No Tip'\
+		END AS tip_bucket,\
+	count(*) AS total_count,\
+	count(*) / 18792764 * 100 as percentage_share\
+FROM nyc_yellow_taxi_partitioned_orc nyc\
+WHERE nyc.yr = 2017 and nyc.mnth in (11, 12) \
+GROUP BY CASE\
+		WHEN nyc.tip_amount >= 0 and nyc.tip_amount < 5\
+			THEN 'tip_paid_0_5_bucket'\
+		WHEN nyc.tip_amount >= 5 and nyc.tip_amount < 10\
+			THEN 'tip_paid_5_10_bucket'\
+		WHEN nyc.tip_amount >= 10 and nyc.tip_amount < 15\
+			THEN 'tip_paid_10_15_bucket'\
+		WHEN nyc.tip_amount >= 15 and nyc.tip_amount < 20\
+			THEN 'tip_paid_15_20_bucket'\
+		WHEN nyc.tip_amount >= 20\
+			THEN 'tip_paid_20_and_above'\
+		ELSE 'No Tip'\
+		END\
+ORDER BY percentage_share desc;\
+--  tip_bucket              total_count percentage_share\
+--	tip_paid_0_5_bucket	    17315854	92.14107089303096\
+--	tip_paid_5_10_bucket	1058563	    5.632822292665411\
+--	tip_paid_10_15_bucket	353445	    1.8807504846014136\
+--	tip_paid_15_20_bucket	45129	    0.24014030080939663\
+--	tip_paid_20_and_above	19676	    0.10469987278082138 \
+--	No Tip          	    97      	0.0005161561120014066\
+\
+-- 3. Which month has a greater average \'91speed\'92 - November or December? \
+SELECT month(nyc.tpep_pickup_datetime) as month,\
+	avg(nyc.trip_distance / ((unix_timestamp(nyc.tpep_dropoff_datetime) - unix_timestamp(nyc.tpep_pickup_datetime)) / 3600)) AS avg_speed_miles_per_hour\
+FROM nyc_yellow_taxi_partitioned_orc nyc\
+WHERE nyc.yr = 2017 and nyc.mnth in (11, 12) \
+GROUP BY month(nyc.tpep_pickup_datetime);\
+-- November 2017 Average Speed was 12.758466512785883 miles per hour\
+-- December 2017 Average Speed was 12.705195837484851 miles per hour\
+-- November month had a greater average speed\
+\
+\
+-- 4. Analyse the average speed of the most happening days of the year i.e. 31st December (New year\'92s eve) and \
+--    25th December (Christmas Eve) and compare it with the overall average\
+\
+select day(nyc.tpep_pickup_datetime) day, \
+    month(nyc.tpep_pickup_datetime) month, \
+    avg(nyc.trip_distance/((unix_timestamp(nyc.tpep_dropoff_datetime)-unix_timestamp(nyc.tpep_pickup_datetime))/3600)) as avg_speed_in_miles_per_hour \
+from nyc_yellow_taxi_partitioned_orc nyc\
+where day(nyc.tpep_pickup_datetime) in (25, 31) and \
+nyc.yr = 2017 and nyc.mnth in (12) \
+--CONCAT(MONTH(nyc.tpep_pickup_datetime),"-",YEAR(nyc.tpep_pickup_datetime)) IN ('12-2017')\
+group by day(nyc.tpep_pickup_datetime), month(nyc.tpep_pickup_datetime);\
+-- day	month	avg_speed_in_miles_per_hour\
+-- 31	12	    14.036533963810392\
+-- 25	12	    16.766895965627906\
+-- Average speed on Christmas and New Year's eve were higher than the overall average and\
+-- the average speed on Christmas day was the highest.\
+\
+---- DELETE BELOW\
+drop table  nyc_yellow_taxi_partitioned_by_tip_paid_range;\
+\
+create external table if not exists nyc_yellow_taxi_partitioned_by_tip_paid_range\
+(VendorID int,\
+tpep_pickup_datetime timestamp,\
+tpep_dropoff_datetime timestamp,\
+passenger_count int,\
+trip_distance double,\
+RatecodeID double,\
+store_and_fwd_flag char(1),\
+PULocationID int,\
+DOLocationID int,\
+payment_type int,\
+fare_amount double,\
+extra double,\
+mta_tax double,\
+tip_amount double,\
+tolls_amount double,\
+improvement_surcharge double,\
+total_amount double) partitioned by (tip_paid_range double)\
+location '/user/vijayanand25_hotmail/nyc_taxi_tip_paid_range'; \
+\
+select * from nyc_yellow_taxi_partitioned_by_tip_paid_range;\
+\
+insert overwrite table nyc_yellow_taxi_partitioned_by_tip_paid_range partition(tip_paid_range)\
+select VendorID,\
+tpep_pickup_datetime,\
+tpep_dropoff_datetime,\
+passenger_count,\
+trip_distance,\
+RatecodeID,\
+store_and_fwd_flag,\
+PULocationID,\
+DOLocationID,\
+payment_type,\
+fare_amount,\
+extra,\
+mta_tax,\
+tip_amount,\
+tolls_amount,\
+improvement_surcharge,\
+total_amount,\
+case \
+        WHEN nyc.tip_amount between 0 and 5\
+			THEN 'tip_paid_0_5_bucket'\
+		WHEN nyc.tip_amount between 5 and 10\
+			THEN 'tip_paid_5_10_bucket'\
+		WHEN nyc.tip_amount between 10 and 15\
+			THEN 'tip_paid_10_15_bucket'\
+		WHEN nyc.tip_amount between 15 and 20\
+			THEN 'tip_paid_15_20_bucket'\
+		WHEN nyc.tip_amount >= 20\
+			THEN 'tip_paid_above_20'\
+		ELSE 'No Tip'\
+            end as tip_paid_range \
+from nyc_yellow_taxi nyc\
+where CONCAT(MONTH(nyc.tpep_pickup_datetime),"-",YEAR(nyc.tpep_pickup_datetime)) \
+IN ('11-2017','12-2017') \
+\
+select partition_date, count(*) from nyc_yellow_taxi_partitioned_by_tip_paid_range\
+\
+select max(* from nyc_yellow_taxi_partitioned_orc where yr = 2017 --18793079\
+\
+show partitions nyc_yellow_taxi_partitioned_by_tip_paid_range\
+\
+select * from nyc_yellow_taxi_partitioned_by_tip_paid_range where tip_paid_range = 'tip_paid_0_5_bucket'\
+\
+drop table nyc_yellow_taxi_partitioned_clustered;\
+\
+create external table if not exists nyc_yellow_taxi_partitioned_clustered\
+(VendorID int,\
+tpep_pickup_datetime timestamp,\
+tpep_dropoff_datetime timestamp,\
+passenger_count int,\
+trip_distance double,\
+RatecodeID double,\
+store_and_fwd_flag char(1),\
+PULocationID int,\
+DOLocationID int,\
+payment_type int,\
+fare_amount double,\
+extra double,\
+mta_tax double,\
+tip_amount double,\
+tolls_amount double,\
+improvement_surcharge double,\
+total_amount double) partitioned by (yr int, mnth int)\
+clustered by (tip_amount) into 5 buckets\
+location '/user/vijayanand25_hotmail/nyc_taxi';\
+\
+insert overwrite table nyc_yellow_taxi_partitioned_clustered partition(yr, mnth)\
+select VendorID,\
+tpep_pickup_datetime,\
+tpep_dropoff_datetime,\
+passenger_count,\
+trip_distance,\
+RatecodeID,\
+store_and_fwd_flag,\
+PULocationID,\
+DOLocationID,\
+payment_type,\
+fare_amount,\
+extra,\
+mta_tax,\
+tip_amount,\
+tolls_amount,\
+improvement_surcharge,\
+total_amount, yr, mnth\
+from nyc_yellow_taxi_partitioned_orc;\
+\
+select * from nyc_yellow_taxi_partitioned_clustered TABLESAMPLE(BUCKET 1 OUT OF 5 ON tip_amount);\
+select distinct nyc.tip_amount from nyc_yellow_taxi_partitioned_clustered  nyc\
+}
